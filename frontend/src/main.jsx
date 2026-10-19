@@ -7,7 +7,7 @@ function App() {
   const [token, setToken] = useState(localStorage.getItem('bar_token') || '');
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('bar_user') || 'null'));
   const [username, setUsername] = useState('owner');
-  const [password, setPassword] = useState('ChangeMe123!');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [tab, setTab] = useState('overview');
@@ -104,7 +104,7 @@ function App() {
     {error && <div className="alert error">{error}</div>}
     <label>Username<input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" /></label>
     <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" /></label>
-    <button className="primary full">Sign in</button><p className="muted tiny">Demo accounts: owner, barman, waitress · Password: ChangeMe123!</p>
+    <button className="primary full">Sign in</button><p className="muted tiny">Sign in using the credentials provided by the system owner</p>
   </form></main>;
 
   return <div className="app-shell">
