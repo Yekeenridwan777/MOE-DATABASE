@@ -71,6 +71,25 @@ app.post('/api/products', allowRoles('owner'), async (req, res) => {
   } finally { client.release(); }
 });
 
+// Delete / Soft-delete a drink (Owner only)
+app.delete('/api/products/:id', allowRoles('owner'), async (req, res) => {
+  const productId = Number(req.params.id);
+  if (!Number.isInteger(productId)) return res.status(400).json({ error: 'Invalid product.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT * FROM products WHERE id=$1 FOR UPDATE', [productId]);
+    if (!result.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Product not found.' }); }
+    await client.query('UPDATE products SET active=FALSE WHERE id=$1', [productId]);
+    await client.query('COMMIT');
+    res.json({ message: 'Drink removed successfully.' });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error(e);
+    res.status(500).json({ error: 'Could not delete product.' });
+  } finally { client.release(); }
+});
+
 app.post('/api/stock/receive', allowRoles('owner'), async (req, res) => {
   const productId = Number(req.body?.productId), quantity = Number(req.body?.quantity);
   const reference = String(req.body?.reference || '').trim();
@@ -100,22 +119,22 @@ app.get('/api/staff', allowRoles('owner'), async (_req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load staff.' }); }
 });
 
+// Load all dockets
 app.get('/api/dockets', async (req, res) => {
   const search = String(req.query.search || '').trim();
   try {
     const result = await pool.query(
       `SELECT d.id,d.docket_number,d.status,d.notes,d.created_at,d.issued_at,
-              w.name AS waitress_name, c.name AS created_by_name, b.name AS barman_name,
+              c.name AS created_by_name, b.name AS barman_name,
               COALESCE(json_agg(json_build_object('productId',p.id,'productName',p.name,'quantity',di.quantity,'unitPrice',di.unit_price))
                 FILTER (WHERE di.id IS NOT NULL),'[]') AS items
        FROM dockets d
-       JOIN users w ON w.id=d.waitress_id
        JOIN users c ON c.id=d.created_by
        LEFT JOIN users b ON b.id=d.issued_by
        LEFT JOIN docket_items di ON di.docket_id=d.id
        LEFT JOIN products p ON p.id=di.product_id
        WHERE ($1='' OR d.docket_number ILIKE '%' || $1 || '%')
-       GROUP BY d.id,w.name,c.name,b.name
+       GROUP BY d.id,c.name,b.name
        ORDER BY d.created_at DESC LIMIT 100`,
       [search]
     );
@@ -123,79 +142,123 @@ app.get('/api/dockets', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load dockets.' }); }
 });
 
-app.post('/api/dockets', allowRoles('owner','waitress'), async (req, res) => {
+// Barman-entered paper docket (Direct stock deduction)
+app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) => {
   const docketNumber = String(req.body?.docketNumber || '').trim();
   const items = req.body?.items;
-  const waitressId = req.user.role === 'waitress' ? req.user.id : Number(req.body?.waitressId);
-  if (!docketNumber || docketNumber.length > 80 || !Array.isArray(items) || items.length < 1 || !Number.isInteger(waitressId)) {
-    return res.status(400).json({ error: 'Docket number, waitress and at least one item are required.' });
+  if (!docketNumber || docketNumber.length > 80 || !Array.isArray(items) || items.length < 1) {
+    return res.status(400).json({ error: 'Docket number and at least one item are required.' });
   }
   const cleanItems = items.map(i => ({ productId: Number(i.productId), quantity: Number(i.quantity) }));
   if (cleanItems.some(i => !Number.isInteger(i.productId) || !Number.isInteger(i.quantity) || i.quantity <= 0)) {
     return res.status(400).json({ error: 'Each item must have a product and positive whole quantity.' });
   }
-  if (new Set(cleanItems.map(i => i.productId)).size !== cleanItems.length) return res.status(400).json({ error: 'Choose each product only once per docket; combine its quantity.' });
+  if (new Set(cleanItems.map(i => i.productId)).size !== cleanItems.length) {
+    return res.status(400).json({ error: 'Choose each product only once per docket; combine its quantity.' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const waitress = await client.query('SELECT id,role FROM users WHERE id=$1 AND active=TRUE', [waitressId]);
-    if (!waitress.rows[0] || waitress.rows[0].role !== 'waitress') { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Select an active waitress account.' }); }
     const d = await client.query(
-      `INSERT INTO dockets(docket_number,waitress_id,created_by)
-       VALUES($1,$2,$3) RETURNING id,docket_number,status,created_at`,
-      [docketNumber, waitressId, req.user.id]
+      `INSERT INTO dockets(docket_number, waitress_id, created_by, status, issued_by, issued_at)
+       VALUES($1, $2, $3, 'issued', $4, NOW()) RETURNING id, docket_number, status, created_at`,
+      [docketNumber, req.user.id, req.user.id, req.user.id]
     );
+    const docketId = d.rows[0].id;
+
     for (const item of cleanItems) {
-      const p = await client.query('SELECT id,selling_price,active FROM products WHERE id=$1', [item.productId]);
-      if (!p.rows[0] || !p.rows[0].active) throw new Error('One selected product is unavailable.');
-      await client.query('INSERT INTO docket_items(docket_id,product_id,quantity,unit_price) VALUES($1,$2,$3,$4)', [d.rows[0].id,item.productId,item.quantity,p.rows[0].selling_price]);
+      const pr = await client.query('SELECT id, name, quantity, selling_price, active FROM products WHERE id=$1 FOR UPDATE', [item.productId]);
+      const p = pr.rows[0];
+      if (!p || !p.active) throw new Error('One selected product is unavailable.');
+      if (p.quantity < item.quantity) throw new Error(`Insufficient stock for ${p.name}. Available: ${p.quantity}, requested: ${item.quantity}.`);
+      
+      const balance = p.quantity - item.quantity;
+      await client.query('UPDATE products SET quantity=$1 WHERE id=$2', [balance, p.id]);
+      await client.query('INSERT INTO docket_items(docket_id, product_id, quantity, unit_price) VALUES($1, $2, $3, $4)', [docketId, item.productId, item.quantity, p.selling_price]);
+      await client.query(
+        `INSERT INTO stock_movements(product_id, movement_type, quantity_change, balance_after, docket_id, performed_by)
+         VALUES($1, 'issued', $2, $3, $4, $5)`,
+        [p.id, -item.quantity, balance, docketId, req.user.id]
+      );
     }
     await client.query('COMMIT');
-    res.status(201).json({ docket: d.rows[0] });
+    res.status(201).json({ message: 'Docket saved and stock deducted successfully.', docket: d.rows[0] });
   } catch (e) {
     await client.query('ROLLBACK');
-    if (e.code === '23505') return res.status(409).json({ error: 'That docket number already exists. Search for it instead of entering it again.' });
-    if (e.message === 'One selected product is unavailable.') return res.status(400).json({ error: e.message });
-    console.error(e); res.status(500).json({ error: 'Could not save docket.' });
+    if (e.code === '23505') return res.status(409).json({ error: 'That docket number already exists.' });
+    if (e.message.startsWith('Insufficient stock') || e.message === 'One selected product is unavailable.') {
+      return res.status(400).json({ error: e.message });
+    }
+    console.error(e);
+    res.status(500).json({ error: 'Could not record docket.' });
   } finally { client.release(); }
 });
 
-app.post('/api/dockets/:id/issue', allowRoles('owner','barman'), async (req, res) => {
+// Barman edit / return route for correcting dockets
+app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) => {
   const docketId = Number(req.params.id);
-  if (!Number.isInteger(docketId)) return res.status(400).json({ error: 'Invalid docket.' });
+  const items = req.body?.items;
+  if (!Number.isInteger(docketId) || !Array.isArray(items)) {
+    return res.status(400).json({ error: 'Invalid request data.' });
+  }
+  const cleanItems = items.map(i => ({ productId: Number(i.productId), quantity: Number(i.quantity) }));
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const dResult = await client.query('SELECT * FROM dockets WHERE id=$1 FOR UPDATE', [docketId]);
-    const d = dResult.rows[0];
-    if (!d) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Docket not found.' }); }
-    if (d.status !== 'pending') { await client.query('ROLLBACK'); return res.status(409).json({ error: `This docket is already ${d.status}. Stock cannot be deducted again.` }); }
-    const items = await client.query('SELECT * FROM docket_items WHERE docket_id=$1 ORDER BY product_id', [docketId]);
-    for (const item of items.rows) {
-      const pr = await client.query('SELECT id,name,quantity FROM products WHERE id=$1 FOR UPDATE', [item.product_id]);
+    const docket = dResult.rows[0];
+    if (!docket) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Docket not found.' }); }
+
+    // 1. Revert previous stock movements for this docket
+    const oldItems = await client.query('SELECT * FROM docket_items WHERE docket_id=$1', [docketId]);
+    for (const oldItem of oldItems.rows) {
+      const pr = await client.query('SELECT id, quantity FROM products WHERE id=$1 FOR UPDATE', [oldItem.product_id]);
+      if (pr.rows[0]) {
+        const restoredBalance = pr.rows[0].quantity + oldItem.quantity;
+        await client.query('UPDATE products SET quantity=$1 WHERE id=$2', [restoredBalance, oldItem.product_id]);
+        await client.query(
+          `INSERT INTO stock_movements(product_id, movement_type, quantity_change, balance_after, docket_id, reason, performed_by)
+           VALUES($1, 'void_reversal', $2, $3, $4, 'Docket edit/return reversal', $5)`,
+          [oldItem.product_id, oldItem.quantity, restoredBalance, docketId, req.user.id]
+        );
+      }
+    }
+    await client.query('DELETE FROM docket_items WHERE docket_id=$1', [docketId]);
+
+    // 2. Apply new items and deduct stock
+    for (const item of cleanItems) {
+      if (item.quantity <= 0) continue;
+      const pr = await client.query('SELECT id, name, quantity, selling_price, active FROM products WHERE id=$1 FOR UPDATE', [item.productId]);
       const p = pr.rows[0];
-      if (!p || p.quantity < item.quantity) throw new Error(`Insufficient stock for ${p?.name || 'a product'}. Available: ${p?.quantity ?? 0}, requested: ${item.quantity}.`);
+      if (!p || !p.active) throw new Error('One selected product is unavailable.');
+      if (p.quantity < item.quantity) throw new Error(`Insufficient stock for ${p.name}. Available: ${p.quantity}, requested: ${item.quantity}.`);
+      
       const balance = p.quantity - item.quantity;
       await client.query('UPDATE products SET quantity=$1 WHERE id=$2', [balance, p.id]);
+      await client.query('INSERT INTO docket_items(docket_id, product_id, quantity, unit_price) VALUES($1, $2, $3, $4)', [docketId, item.productId, item.quantity, p.selling_price]);
       await client.query(
-        `INSERT INTO stock_movements(product_id,movement_type,quantity_change,balance_after,docket_id,performed_by)
-         VALUES($1,'issued',$2,$3,$4,$5)`,
-        [p.id, -item.quantity, balance, d.id, req.user.id]
+        `INSERT INTO stock_movements(product_id, movement_type, quantity_change, balance_after, docket_id, reason, performed_by)
+         VALUES($1, 'issued', $2, $3, $4, 'Docket edited', $5)`,
+        [p.id, -item.quantity, balance, docketId, req.user.id]
       );
     }
-    await client.query("UPDATE dockets SET status='issued',issued_by=$1,issued_at=NOW() WHERE id=$2", [req.user.id,d.id]);
     await client.query('COMMIT');
-    res.json({ message: 'Docket issued and stock updated.' });
+    res.json({ message: 'Docket updated successfully and inventory adjusted.' });
   } catch (e) {
     await client.query('ROLLBACK');
-    if (e.message.startsWith('Insufficient stock')) return res.status(409).json({ error: e.message });
-    console.error(e); res.status(500).json({ error: 'Could not issue docket.' });
+    if (e.message.startsWith('Insufficient stock') || e.message === 'One selected product is unavailable.') {
+      return res.status(400).json({ error: e.message });
+    }
+    console.error(e);
+    res.status(500).json({ error: 'Could not update docket.' });
   } finally { client.release(); }
 });
 
 app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
   try {
-    const [stock, issued, movements, dockets] = await Promise.all([
+    const [stock, issued, movements] = await Promise.all([
       pool.query(`SELECT COUNT(*)::int AS product_count, COALESCE(SUM(quantity),0)::int AS total_units,
                          COUNT(*) FILTER (WHERE quantity <= low_stock_threshold)::int AS low_stock_count
                   FROM products WHERE active=TRUE`),
@@ -208,12 +271,9 @@ app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
                          p.name AS product_name,u.name AS staff_name,d.docket_number
                   FROM stock_movements sm JOIN products p ON p.id=sm.product_id
                   JOIN users u ON u.id=sm.performed_by LEFT JOIN dockets d ON d.id=sm.docket_id
-                  ORDER BY sm.created_at DESC LIMIT 30`),
-      pool.query(`SELECT d.docket_number,d.status,d.created_at,d.issued_at,w.name AS waitress_name,b.name AS barman_name
-                  FROM dockets d JOIN users w ON w.id=d.waitress_id LEFT JOIN users b ON b.id=d.issued_by
-                  ORDER BY d.created_at DESC LIMIT 10`)
+                  ORDER BY sm.created_at DESC LIMIT 30`)
     ]);
-    res.json({ stock: stock.rows[0], issuedToday: issued.rows[0], recentMovements: movements.rows, recentDockets: dockets.rows });
+    res.json({ stock: stock.rows[0], issuedToday: issued.rows[0], recentMovements: movements.rows });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load report.' }); }
 });
 
