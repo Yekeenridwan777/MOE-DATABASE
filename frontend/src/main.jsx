@@ -2,7 +2,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+const API = (
+  import.meta.env.VITE_API_URL ||
+  'https://bar-stock-backend-yflx.onrender.com/api'
+).replace(/\/+$/, '');
 function App() {
   const [token, setToken] = useState(localStorage.getItem('bar_token') || '');
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('bar_user') || 'null'));
