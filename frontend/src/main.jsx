@@ -145,6 +145,7 @@ function App() {
 
   const currency = n => new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 }).format(Number(n || 0));
   const calculatedActiveStockValue = products.filter(p => Number(p.quantity) > 0).reduce((a, p) => a + (Number(p.quantity) * Number(p.selling_price)), 0);
+  const calculatedLowStockCount = products.filter(p => Number(p.quantity) > 0 && Number(p.quantity) <= Number(p.low_stock_threshold)).length;
 
   if (!token || !user) return <main className="login-wrap"><form className="login-card" onSubmit={login}>
     <div className="brand-mark">BC</div><p className="eyebrow">BAR OPERATIONS</p><h1>Stock Control</h1><p className="muted">Paper dockets, automated bar inventory, and accountability.</p>
@@ -170,7 +171,7 @@ function App() {
           <Metric label="Product types" value={products.length} note="Active drink types" />
           <Metric label="Total units in stock" value={products.reduce((a,p)=>a+Number(p.quantity),0)} note="Current physical balance" />
           <Metric label="Active Stock Value" value={currency(calculatedActiveStockValue)} note="Excluding zero-stock items" />
-          {isOwner && <Metric label="Low-stock items" value={report?.stock?.low_stock_count ?? '—'} note="At or below threshold" />}
+          {isOwner && <Metric label="Low-stock items" value={calculatedLowStockCount} note="At or below threshold (excl. 0 qty)" />}
         </section>
         <section className="panel"><div className="panel-heading"><div><h2>Current stock balance</h2><p>Live inventory count</p></div><button className="text-button" onClick={()=>setTab('inventory')}>Manage inventory →</button></div><ProductTable products={products} currency={currency}/></section>
         <section className="panel"><div className="panel-heading"><div><h2>Recent dockets</h2><p>Dockets logged and automatically deducted</p></div><button className="text-button" onClick={()=>setTab('dockets')}>View / Edit →</button></div><DocketTable dockets={dockets.slice(0,6)} onEdit={startEditDocket}/></section>
@@ -197,7 +198,11 @@ function App() {
                   </span>
                 )}
               </td>
-              <td><span className={Number(p.quantity)<=Number(p.low_stock_threshold)?'pill warning':'pill good'}>{Number(p.quantity)<=Number(p.low_stock_threshold)?'Low stock':'In stock'}</span></td>
+              <td>
+                <span className={Number(p.quantity) === 0 ? 'pill warning' : Number(p.quantity) <= Number(p.low_stock_threshold) ? 'pill warning' : 'pill good'}>
+                  {Number(p.quantity) === 0 ? 'Out of stock' : Number(p.quantity) <= Number(p.low_stock_threshold) ? 'Low stock' : 'In stock'}
+                </span>
+              </td>
               <td>{isOwner && <button className="small danger" onClick={()=>deleteProduct(p.id)}>Delete</button>}</td>
             </tr>)}
           </tbody></table></div>
@@ -245,7 +250,11 @@ function App() {
 }
 
 function Metric({label,value,note}) { return <div className="metric"><p>{label}</p><strong>{value}</strong><small>{note}</small></div>; }
-function ProductTable({products,currency}) { return <div className="table-wrap"><table><thead><tr><th>Drink</th><th>Unit</th><th>Quantity</th><th>Low-stock level</th><th>Price</th><th>Status</th></tr></thead><tbody>{products.map(p=><tr key={p.id}><td><strong>{p.name}</strong></td><td>{p.unit}</td><td>{p.quantity}</td><td>{p.low_stock_threshold}</td><td>{currency(p.selling_price)}</td><td><span className={Number(p.quantity)<=Number(p.low_stock_threshold)?'pill warning':'pill good'}>{Number(p.quantity)<=Number(p.low_stock_threshold)?'Low stock':'In stock'}</span></td></tr>)}</tbody></table>{!products.length&&<p className="empty">No products found.</p>}</div>; }
+function ProductTable({products,currency}) { return <div className="table-wrap"><table><thead><tr><th>Drink</th><th>Unit</th><th>Quantity</th><th>Low-stock level</th><th>Price</th><th>Status</th></tr></thead><tbody>{products.map(p=><tr key={p.id}><td><strong>{p.name}</strong></td><td>{p.unit}</td><td>{p.quantity}</td><td>{p.low_stock_threshold}</td><td>{currency(p.selling_price)}</td><td>
+  <span className={Number(p.quantity) === 0 ? 'pill warning' : Number(p.quantity) <= Number(p.low_stock_threshold) ? 'pill warning' : 'pill good'}>
+    {Number(p.quantity) === 0 ? 'Out of stock' : Number(p.quantity) <= Number(p.low_stock_threshold) ? 'Low stock' : 'In stock'}
+  </span>
+</td></tr>)}</tbody></table>{!products.length&&<p className="empty">No products found.</p>}</div>; }
 function DocketTable({dockets,onEdit}) { return <div className="table-wrap"><table><thead><tr><th>Docket #</th><th>Items Sold</th><th>Status</th><th>Logged By</th><th>Created</th><th>Action</th></tr></thead><tbody>{dockets.map(d=><tr key={d.id}><td><strong>{d.docket_number}</strong></td><td>{(d.items||[]).map(i=>`${i.productName} × ${i.quantity}`).join(', ')}</td><td><span className="pill good">Issued</span></td><td>{d.barman_name || 'Staff'}</td><td>{new Date(d.created_at).toLocaleString()}</td><td><button className="small secondary" onClick={()=>onEdit(d)}>Edit / Return</button></td></tr>)}</tbody></table>{!dockets.length&&<p className="empty">No dockets found.</p>}</div>; }
 
 createRoot(document.getElementById('root')).render(<App />);
