@@ -144,12 +144,12 @@ app.get('/api/staff', allowRoles('owner'), async (_req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load staff.' }); }
 });
 
-// Load all dockets (including waitress_name)
+// Load all dockets
 app.get('/api/dockets', async (req, res) => {
   const search = String(req.query.search || '').trim();
   try {
     const result = await pool.query(
-      `SELECT d.id,d.docket_number,d.status,d.notes,d.waitress_name,d.created_at,d.issued_at,
+      `SELECT d.id,d.docket_number,d.status,d.notes,d.created_at,d.issued_at,
               c.name AS created_by_name, b.name AS barman_name,
               COALESCE(json_agg(json_build_object('productId',p.id,'productName',p.name,'quantity',di.quantity,'unitPrice',di.unit_price))
                 FILTER (WHERE di.id IS NOT NULL),'[]') AS items
@@ -167,10 +167,9 @@ app.get('/api/dockets', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load dockets.' }); }
 });
 
-// Barman-entered paper docket with waitress name support
+// Barman-entered paper docket
 app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) => {
   const docketNumber = String(req.body?.docketNumber || '').trim();
-  const waitressName = String(req.body?.waitressName || '').trim();
   const items = req.body?.items;
   
   if (!docketNumber || docketNumber.length > 80 || !Array.isArray(items) || items.length < 1) {
@@ -188,9 +187,9 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   try {
     await client.query('BEGIN');
     const d = await client.query(
-      `INSERT INTO dockets(docket_number, waitress_name, created_by, status, issued_by, issued_at)
-       VALUES($1, $2, $3, 'issued', $4, NOW()) RETURNING id, docket_number, status, waitress_name, created_at`,
-      [docketNumber, waitressName || null, req.user.id, req.user.id]
+      `INSERT INTO dockets(docket_number, created_by, status, issued_by, issued_at)
+       VALUES($1, $2, 'issued', $3, NOW()) RETURNING id, docket_number, status, created_at`,
+      [docketNumber, req.user.id, req.user.id]
     );
     const docketId = d.rows[0].id;
 
@@ -222,11 +221,10 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   } finally { client.release(); }
 });
 
-// Barman edit / return route supporting docket number changes and waitress names
+// Barman edit / return route supporting docket number changes
 app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) => {
   const docketId = Number(req.params.id);
   const newDocketNumber = String(req.body?.newDocketNumber || '').trim();
-  const waitressName = String(req.body?.waitressName || '').trim();
   const items = req.body?.items;
 
   if (!Number.isInteger(docketId) || !Array.isArray(items)) {
@@ -264,7 +262,7 @@ app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) 
     await client.query('DELETE FROM docket_items WHERE docket_id=$1', [docketId]);
 
     // 2. Update docket metadata
-    await client.query('UPDATE dockets SET docket_number=$1, waitress_name=$2 WHERE id=$3', [targetDocketNum, waitressName || null, docketId]);
+    await client.query('UPDATE dockets SET docket_number=$1 WHERE id=$2', [targetDocketNum, docketId]);
 
     // 3. Apply new items and deduct stock
     for (const item of cleanItems) {
@@ -298,14 +296,12 @@ app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) 
 app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
   try {
     const [stock, issued, movements] = await Promise.all([
-      // Summing total value strictly for items where quantity > 0
       pool.query(`SELECT COUNT(*)::int AS product_count, 
                          COALESCE(SUM(quantity),0)::int AS total_units,
                          COALESCE(SUM(quantity * selling_price),0)::numeric(12,2) AS total_stock_value,
                          COUNT(*) FILTER (WHERE quantity <= low_stock_threshold)::int AS low_stock_count
                   FROM products WHERE active=TRUE AND quantity > 0`),
       
-      // FIXED: Business day cuts off at 6:00 AM instead of midnight, capturing late night sales (past 12 AM)
       pool.query(`SELECT COUNT(DISTINCT d.id)::int AS dockets_issued_today,
                          COALESCE(SUM(di.quantity),0)::int AS units_issued_today,
                          COALESCE(SUM(di.quantity * di.unit_price),0)::numeric(12,2) AS recorded_value_today
