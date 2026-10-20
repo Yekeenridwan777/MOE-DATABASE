@@ -149,17 +149,16 @@ app.get('/api/dockets', async (req, res) => {
   const search = String(req.query.search || '').trim();
   try {
     const result = await pool.query(
-      `SELECT d.id,d.docket_number,d.status,d.notes,d.created_at,d.issued_at,
-              c.name AS created_by_name, b.name AS barman_name,
+      `SELECT d.id,d.docket_number,d.status,d.notes,d.created_at,
+              c.name AS created_by_name,
               COALESCE(json_agg(json_build_object('productId',p.id,'productName',p.name,'quantity',di.quantity,'unitPrice',di.unit_price))
                 FILTER (WHERE di.id IS NOT NULL),'[]') AS items
        FROM dockets d
        JOIN users c ON c.id=d.created_by
-       LEFT JOIN users b ON b.id=d.issued_by
        LEFT JOIN docket_items di ON di.docket_id=d.id
        LEFT JOIN products p ON p.id=di.product_id
        WHERE ($1='' OR d.docket_number ILIKE '%' || $1 || '%')
-       GROUP BY d.id,c.name,b.name
+       GROUP BY d.id,c.name
        ORDER BY d.created_at DESC LIMIT 100`,
       [search]
     );
@@ -167,7 +166,7 @@ app.get('/api/dockets', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load dockets.' }); }
 });
 
-// Barman-entered paper docket
+// Barman-entered paper docket (Schema-safe)
 app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) => {
   const docketNumber = String(req.body?.docketNumber || '').trim();
   const items = req.body?.items;
@@ -187,9 +186,9 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   try {
     await client.query('BEGIN');
     const d = await client.query(
-      `INSERT INTO dockets(docket_number, created_by, status, issued_by, issued_at)
-       VALUES($1, $2, 'issued', $3, NOW()) RETURNING id, docket_number, status, created_at`,
-      [docketNumber, req.user.id, req.user.id]
+      `INSERT INTO dockets(docket_number, created_by, status)
+       VALUES($1, $2, 'issued') RETURNING id, docket_number, status, created_at`,
+      [docketNumber, req.user.id]
     );
     const docketId = d.rows[0].id;
 
@@ -221,7 +220,7 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   } finally { client.release(); }
 });
 
-// Barman edit / return route supporting docket number changes
+// Barman edit / return route
 app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) => {
   const docketId = Number(req.params.id);
   const newDocketNumber = String(req.body?.newDocketNumber || '').trim();
@@ -307,8 +306,8 @@ app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
                          COALESCE(SUM(di.quantity * di.unit_price),0)::numeric(12,2) AS recorded_value_today
                   FROM dockets d JOIN docket_items di ON di.docket_id=d.id
                   WHERE d.status='issued' 
-                  AND d.issued_at >= (CURRENT_TIMESTAMP::date + INTERVAL '6 hours' - INTERVAL '1 day')
-                  AND d.issued_at < (CURRENT_TIMESTAMP::date + INTERVAL '6 hours')`),
+                  AND d.created_at >= (CURRENT_TIMESTAMP::date + INTERVAL '6 hours' - INTERVAL '1 day')
+                  AND d.created_at < (CURRENT_TIMESTAMP::date + INTERVAL '6 hours')`),
       
       pool.query(`SELECT sm.id,sm.movement_type,sm.quantity_change,sm.balance_after,sm.reference,sm.reason,sm.created_at,
                          p.name AS product_name,u.name AS staff_name,d.docket_number
