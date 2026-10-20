@@ -298,17 +298,21 @@ app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) 
 app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
   try {
     const [stock, issued, movements] = await Promise.all([
+      // Summing total value strictly for items where quantity > 0
       pool.query(`SELECT COUNT(*)::int AS product_count, 
                          COALESCE(SUM(quantity),0)::int AS total_units,
                          COALESCE(SUM(quantity * selling_price),0)::numeric(12,2) AS total_stock_value,
                          COUNT(*) FILTER (WHERE quantity <= low_stock_threshold)::int AS low_stock_count
                   FROM products WHERE active=TRUE AND quantity > 0`),
       
-      pool.query(`SELECT COUNT(*)::int AS dockets_issued_today,
+      // FIXED: Business day cuts off at 6:00 AM instead of midnight, capturing late night sales (past 12 AM)
+      pool.query(`SELECT COUNT(DISTINCT d.id)::int AS dockets_issued_today,
                          COALESCE(SUM(di.quantity),0)::int AS units_issued_today,
                          COALESCE(SUM(di.quantity * di.unit_price),0)::numeric(12,2) AS recorded_value_today
                   FROM dockets d JOIN docket_items di ON di.docket_id=d.id
-                  WHERE d.status='issued' AND d.issued_at >= CURRENT_DATE`),
+                  WHERE d.status='issued' 
+                  AND d.issued_at >= (CURRENT_TIMESTAMP::date + INTERVAL '6 hours' - INTERVAL '1 day')
+                  AND d.issued_at < (CURRENT_TIMESTAMP::date + INTERVAL '6 hours')`),
       
       pool.query(`SELECT sm.id,sm.movement_type,sm.quantity_change,sm.balance_after,sm.reference,sm.reason,sm.created_at,
                          p.name AS product_name,u.name AS staff_name,d.docket_number
