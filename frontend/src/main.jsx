@@ -144,7 +144,14 @@ function App() {
   }
 
   const currency = n => new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 }).format(Number(n || 0));
-  const calculatedActiveStockValue = products.filter(p => Number(p.quantity) > 0).reduce((a, p) => a + (Number(p.quantity) * Number(p.selling_price)), 0);
+  
+  // STRICTLY calculated local active stock value ignoring any 0 quantity items
+  const calculatedActiveStockValue = products.reduce((acc, p) => {
+    const qty = Number(p.quantity) || 0;
+    const price = Number(p.selling_price) || 0;
+    return qty > 0 ? acc + (qty * price) : acc;
+  }, 0);
+
   const calculatedLowStockCount = products.filter(p => Number(p.quantity) > 0 && Number(p.quantity) <= Number(p.low_stock_threshold)).length;
 
   if (!token || !user) return <main className="login-wrap"><form className="login-card" onSubmit={login}>
