@@ -71,6 +71,31 @@ app.post('/api/products', allowRoles('owner'), async (req, res) => {
   } finally { client.release(); }
 });
 
+// Update product price or low-stock threshold (Owner only)
+app.put('/api/products/:id', allowRoles('owner'), async (req, res) => {
+  const productId = Number(req.params.id);
+  const { sellingPrice, lowStockThreshold } = req.body || {};
+  if (!Number.isInteger(productId)) return res.status(400).json({ error: 'Invalid product.' });
+  
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT * FROM products WHERE id=$1 FOR UPDATE', [productId]);
+    if (!result.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Product not found.' }); }
+    
+    const updated = await client.query(
+      'UPDATE products SET selling_price = COALESCE($1, selling_price), low_stock_threshold = COALESCE($2, low_stock_threshold) WHERE id=$3 RETURNING *',
+      [sellingPrice !== undefined ? Number(sellingPrice) : null, lowStockThreshold !== undefined ? Number(lowStockThreshold) : null, productId]
+    );
+    await client.query('COMMIT');
+    res.json({ product: updated.rows[0] });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error(e);
+    res.status(500).json({ error: 'Could not update product.' });
+  } finally { client.release(); }
+});
+
 // Delete / Soft-delete a drink (Owner only)
 app.delete('/api/products/:id', allowRoles('owner'), async (req, res) => {
   const productId = Number(req.params.id);
@@ -119,12 +144,12 @@ app.get('/api/staff', allowRoles('owner'), async (_req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load staff.' }); }
 });
 
-// Load all dockets
+// Load all dockets (including waitress_name)
 app.get('/api/dockets', async (req, res) => {
   const search = String(req.query.search || '').trim();
   try {
     const result = await pool.query(
-      `SELECT d.id,d.docket_number,d.status,d.notes,d.created_at,d.issued_at,
+      `SELECT d.id,d.docket_number,d.status,d.notes,d.waitress_name,d.created_at,d.issued_at,
               c.name AS created_by_name, b.name AS barman_name,
               COALESCE(json_agg(json_build_object('productId',p.id,'productName',p.name,'quantity',di.quantity,'unitPrice',di.unit_price))
                 FILTER (WHERE di.id IS NOT NULL),'[]') AS items
@@ -142,10 +167,12 @@ app.get('/api/dockets', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load dockets.' }); }
 });
 
-// Barman-entered paper docket (Direct stock deduction)
+// Barman-entered paper docket with waitress name support
 app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) => {
   const docketNumber = String(req.body?.docketNumber || '').trim();
+  const waitressName = String(req.body?.waitressName || '').trim();
   const items = req.body?.items;
+  
   if (!docketNumber || docketNumber.length > 80 || !Array.isArray(items) || items.length < 1) {
     return res.status(400).json({ error: 'Docket number and at least one item are required.' });
   }
@@ -161,9 +188,9 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   try {
     await client.query('BEGIN');
     const d = await client.query(
-      `INSERT INTO dockets(docket_number, waitress_id, created_by, status, issued_by, issued_at)
-       VALUES($1, $2, $3, 'issued', $4, NOW()) RETURNING id, docket_number, status, created_at`,
-      [docketNumber, req.user.id, req.user.id, req.user.id]
+      `INSERT INTO dockets(docket_number, waitress_name, created_by, status, issued_by, issued_at)
+       VALUES($1, $2, $3, 'issued', $4, NOW()) RETURNING id, docket_number, status, waitress_name, created_at`,
+      [docketNumber, waitressName || null, req.user.id, req.user.id]
     );
     const docketId = d.rows[0].id;
 
@@ -195,10 +222,13 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   } finally { client.release(); }
 });
 
-// Barman edit / return route for correcting dockets
+// Barman edit / return route supporting docket number changes and waitress names
 app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) => {
   const docketId = Number(req.params.id);
+  const newDocketNumber = String(req.body?.newDocketNumber || '').trim();
+  const waitressName = String(req.body?.waitressName || '').trim();
   const items = req.body?.items;
+
   if (!Number.isInteger(docketId) || !Array.isArray(items)) {
     return res.status(400).json({ error: 'Invalid request data.' });
   }
@@ -210,6 +240,12 @@ app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) 
     const dResult = await client.query('SELECT * FROM dockets WHERE id=$1 FOR UPDATE', [docketId]);
     const docket = dResult.rows[0];
     if (!docket) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Docket not found.' }); }
+
+    const targetDocketNum = newDocketNumber || docket.docket_number;
+    if (targetDocketNum !== docket.docket_number) {
+      const dup = await client.query('SELECT id FROM dockets WHERE docket_number=$1 AND id<>$2', [targetDocketNum, docketId]);
+      if (dup.rows.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'That docket number already exists.' }); }
+    }
 
     // 1. Revert previous stock movements for this docket
     const oldItems = await client.query('SELECT * FROM docket_items WHERE docket_id=$1', [docketId]);
@@ -227,7 +263,10 @@ app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) 
     }
     await client.query('DELETE FROM docket_items WHERE docket_id=$1', [docketId]);
 
-    // 2. Apply new items and deduct stock
+    // 2. Update docket metadata
+    await client.query('UPDATE dockets SET docket_number=$1, waitress_name=$2 WHERE id=$3', [targetDocketNum, waitressName || null, docketId]);
+
+    // 3. Apply new items and deduct stock
     for (const item of cleanItems) {
       if (item.quantity <= 0) continue;
       const pr = await client.query('SELECT id, name, quantity, selling_price, active FROM products WHERE id=$1 FOR UPDATE', [item.productId]);
@@ -259,14 +298,18 @@ app.put('/api/dockets/:id/edit', allowRoles('owner','barman'), async (req, res) 
 app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
   try {
     const [stock, issued, movements] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS product_count, COALESCE(SUM(quantity),0)::int AS total_units,
+      pool.query(`SELECT COUNT(*)::int AS product_count, 
+                         COALESCE(SUM(quantity),0)::int AS total_units,
+                         COALESCE(SUM(quantity * selling_price),0)::numeric(12,2) AS total_stock_value,
                          COUNT(*) FILTER (WHERE quantity <= low_stock_threshold)::int AS low_stock_count
-                  FROM products WHERE active=TRUE`),
+                  FROM products WHERE active=TRUE AND quantity > 0`),
+      
       pool.query(`SELECT COUNT(*)::int AS dockets_issued_today,
                          COALESCE(SUM(di.quantity),0)::int AS units_issued_today,
                          COALESCE(SUM(di.quantity * di.unit_price),0)::numeric(12,2) AS recorded_value_today
                   FROM dockets d JOIN docket_items di ON di.docket_id=d.id
                   WHERE d.status='issued' AND d.issued_at >= CURRENT_DATE`),
+      
       pool.query(`SELECT sm.id,sm.movement_type,sm.quantity_change,sm.balance_after,sm.reference,sm.reason,sm.created_at,
                          p.name AS product_name,u.name AS staff_name,d.docket_number
                   FROM stock_movements sm JOIN products p ON p.id=sm.product_id
