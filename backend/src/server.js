@@ -166,7 +166,7 @@ app.get('/api/dockets', async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error: 'Could not load dockets.' }); }
 });
 
-// Barman-entered paper docket (Schema-safe)
+// Barman-entered paper docket (Schema-safe with waitress_id)
 app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) => {
   const docketNumber = String(req.body?.docketNumber || '').trim();
   const items = req.body?.items;
@@ -186,8 +186,8 @@ app.post('/api/dockets/barman', allowRoles('owner','barman'), async (req, res) =
   try {
     await client.query('BEGIN');
     const d = await client.query(
-      `INSERT INTO dockets(docket_number, created_by, status)
-       VALUES($1, $2, 'issued') RETURNING id, docket_number, status, created_at`,
+      `INSERT INTO dockets(docket_number, created_by, status, waitress_id)
+       VALUES($1, $2, 'issued', $2) RETURNING id, docket_number, status, created_at`,
       [docketNumber, req.user.id]
     );
     const docketId = d.rows[0].id;
