@@ -299,7 +299,7 @@ app.get('/api/reports/summary', allowRoles('owner'), async (_req, res) => {
       pool.query(`SELECT COUNT(*)::int AS product_count, 
                          COALESCE(SUM(quantity),0)::int AS total_units,
                          COALESCE(SUM(quantity * selling_price),0)::numeric(12,2) AS total_stock_value,
-                         COUNT(*) FILTER (WHERE quantity <= low_stock_threshold)::int AS low_stock_count
+                         COUNT(*) FILTER (WHERE quantity > 0 AND quantity <= low_stock_threshold)::int AS low_stock_count
                   FROM products WHERE active=TRUE AND quantity > 0`),
       
       pool.query(`SELECT COUNT(DISTINCT d.id)::int AS dockets_issued_today,
