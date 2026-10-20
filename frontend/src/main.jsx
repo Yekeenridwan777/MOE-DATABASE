@@ -170,7 +170,7 @@ function App() {
         <section className="metric-grid">
           <Metric label="Product types" value={products.length} note="Active drink types" />
           <Metric label="Total units in stock" value={products.reduce((a,p)=>a+Number(p.quantity),0)} note="Current physical balance" />
-          <Metric label="Active Stock Value" value={currency(report?.stock?.total_stock_value || products.filter(p=>Number(p.quantity)>0).reduce((a,p)=>a+(Number(p.quantity)*Number(p.selling_price)),0))} note="Excluding zero-stock items" />
+          <Metric label="Active Stock Value" value={currency(products.filter(p=>Number(p.quantity)>0).reduce((a,p)=>a+(Number(p.quantity)*Number(p.selling_price)),0))} note="Excluding zero-stock items" />
           {isOwner && <Metric label="Low-stock items" value={report?.stock?.low_stock_count ?? '—'} note="At or below threshold" />}
         </section>
         <section className="panel"><div className="panel-heading"><div><h2>Current stock balance</h2><p>Live inventory count</p></div><button className="text-button" onClick={()=>setTab('inventory')}>Manage inventory →</button></div><ProductTable products={products} currency={currency}/></section>
