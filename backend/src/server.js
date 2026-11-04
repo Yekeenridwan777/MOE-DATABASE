@@ -121,12 +121,12 @@ async function ensureDatabase() {
 
     await pool.query("DELETE FROM users WHERE username IN ('blessing', 'mary')");
 
-    // Fixed: Guaranteed matching passwords so login succeeds out of the box
-    const ownerPass = 'password123';
-    const barmanPass = 'barman123';
-    const chefPass = 'chef123';
-    const waitressPass = 'waitress123';
-    const cashierPass = 'cashier123';
+    // Pull passwords from Render Environment variables (falling back to defaults if not set)
+    const ownerPass = process.env.SEED_OWNER_PASSWORD || 'password123';
+    const barmanPass = process.env.SEED_BARMAN_PASSWORD || 'barman123';
+    const chefPass = process.env.SEED_CHEF_PASSWORD || 'chef123';
+    const waitressPass = process.env.SEED_WAITRESS_PASSWORD || 'waitress123';
+    const cashierPass = process.env.SEED_CASHIER_PASSWORD || 'cashier123';
 
     const usersToSeed = [
       { name: 'Bar Owner', username: 'owner', role: 'owner', pass: ownerPass },
