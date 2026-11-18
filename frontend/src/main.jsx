@@ -242,7 +242,7 @@ function App() {
           <div className="brand-mark">
             <img src={logoImg} alt="Hotel Logo" className="brand-logo-img" />
           </div>
-          <div><strong>Malyn Bar</strong><small>{user.role.toUpperCase()} PORTAL</small></div>
+          <div><strong>MINISTA OF ENJOYMENT</strong><small>{user.role.toUpperCase()} PORTAL</small></div>
         </div>
         <div className="userbox">
           <span className="avatar">{user.name?.slice(0, 1)}</span>
