@@ -278,7 +278,7 @@ function App() {
 
       <main className="main">
         <header className="topbar">
-          <div><p className="eyebrow">MALYN BAR / {user.role.toUpperCase()}</p><h1>{user.name} Dashboard</h1></div>
+          <div><p className="eyebrow">MINISTA OF ENJOYMENT/ {user.role.toUpperCase()}</p><h1>{user.name} Dashboard</h1></div>
           <button className="secondary" onClick={loadAll}>Refresh data</button>
         </header>
 
